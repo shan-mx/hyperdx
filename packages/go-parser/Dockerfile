@@ -3,6 +3,9 @@
 # specify the base image to  be used for the application, alpine or ubuntu
 FROM golang:1.21-alpine
 
+# use cn proxy
+ENV GOPROXY=https://goproxy.cn
+
 # create a working directory inside the image
 WORKDIR /app
 
