@@ -1,11 +1,24 @@
 import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/router';
 import { format as fnsFormat, formatDistanceToNowStrict } from 'date-fns';
+import { formatInTimeZone } from 'date-fns-tz';
 import numbro from 'numbro';
 import type { MutableRefObject } from 'react';
 
 import { dateRangeToString } from './timeQuery';
 import { MetricsDataType, NumberFormat } from './types';
+
+export function omit<T extends object, K extends keyof T>(
+  obj: T,
+  paths: K[],
+): Omit<T, K> {
+  return {
+    ...paths.reduce(
+      (mem, key) => ((k: K, { [k]: ignored, ...rest }) => rest)(key, mem),
+      obj as object,
+    ),
+  } as Omit<T, K>;
+}
 
 export function generateSearchUrl({
   query,
@@ -161,11 +174,6 @@ export const useDebounce = <T,>(
   return debouncedValue;
 };
 
-export const TIME_TOKENS = {
-  '12h': 'MMM d h:mm:ss a',
-  '24h': 'MMM d HH:mm:ss.SSS',
-};
-
 export function useLocalStorage<T>(key: string, initialValue: T) {
   // State to store our value
   // Pass initial state function to useState so logic is only executed once
@@ -241,8 +249,16 @@ export function formatDistanceToNowStrictShort(date: Date) {
     .replace(' seconds', 's');
 }
 
-export function formatHumanReadableDate(date: Date) {
-  return fnsFormat(date, 'MMMM d, h:mmaaa');
+export function formatmmss(milliseconds?: number) {
+  if (milliseconds == null) {
+    return '--:--';
+  }
+
+  const value = Math.max(milliseconds, 0);
+  const minutes = Math.floor(value / 1000 / 60);
+  const seconds = Math.floor((value / 1000) % 60);
+
+  return `${minutes}:${seconds < 10 ? '0' : ''}${seconds}`;
 }
 
 export const getLogLevelClass = (lvl: string | undefined) => {
@@ -269,21 +285,26 @@ export const getLogLevelClass = (lvl: string | undefined) => {
     : undefined;
 };
 
+// Accessible chart colors
 const COLORS = [
-  '#d5dade', // White
   '#20c997', // Green
-  '#0dcaf0', // Turqoise
   '#8250dc', // Light Purple
   '#cdad7a', // Tan
-  '#6610f2', // Purple
   '#0d6efd', // Blue
   '#fd7e14', // Orange
+  '#0dcaf0', // Turqoise
   '#828c95', // Grey
   '#ff9382', // Coral
   '#39b5ab', // Olive-tealish?
   '#ffa600', // Yellow
-  // '#d63384', // Magenta, too close to red
 ];
+
+const STROKE_DASHARRAYS = ['0', '4 3', '5 5'];
+
+const STROKE_WIDTHS = [1.25];
+
+const STROKE_OPACITIES = [1];
+
 export function hashCode(str: string) {
   let hash = 0,
     i,
@@ -297,13 +318,11 @@ export function hashCode(str: string) {
   return hash;
 }
 
-const keyedColor = (key: string | number | undefined) => {
-  const num = Math.floor(Math.abs(hashCode(`${key}` ?? '')));
-  return COLORS[num % COLORS.length];
-};
-
 // Try to match log levels to colors
-export const semanticKeyedColor = (key: string | number | undefined) => {
+export const semanticKeyedColor = (
+  key: string | number | undefined,
+  index: number,
+) => {
   const logLevel = getLogLevelClass(`${key}`);
   if (logLevel != null) {
     return logLevel === 'error'
@@ -313,7 +332,42 @@ export const semanticKeyedColor = (key: string | number | undefined) => {
       : '#20c997'; // green;
   }
 
-  return keyedColor(key);
+  return COLORS[index % COLORS.length];
+};
+
+const getLevelColor = (logLevel?: string) => {
+  if (logLevel == null) {
+    return;
+  }
+  return logLevel === 'error'
+    ? '#d63384' // magenta
+    : logLevel === 'warn'
+    ? '#ffc107' // yellow
+    : '#20c997'; // green;
+};
+
+export const getColorProps = (
+  index: number,
+  level: string,
+): {
+  color: string;
+  strokeDasharray: string;
+  opacity: number;
+  strokeWidth: number;
+} => {
+  const logLevel = getLogLevelClass(level);
+  const colorOverride = getLevelColor(logLevel);
+
+  // How many same colored lines we already have
+  const colorStep = Math.floor(index / COLORS.length);
+
+  return {
+    color: colorOverride ?? COLORS[index % COLORS.length],
+    strokeDasharray:
+      STROKE_DASHARRAYS[Math.min(STROKE_DASHARRAYS.length, colorStep)],
+    opacity: STROKE_OPACITIES[Math.min(STROKE_OPACITIES.length, colorStep)],
+    strokeWidth: STROKE_WIDTHS[Math.min(STROKE_WIDTHS.length, colorStep)],
+  };
 };
 
 export const truncateMiddle = (str: string, maxLen = 10) => {
@@ -462,4 +516,43 @@ export const legacyMetricNameToNameAndDataType = (metricName?: string) => {
     name: mName,
     dataType: mDataType as MetricsDataType,
   };
+};
+
+// Date formatting
+const TIME_TOKENS = {
+  normal: {
+    '12h': 'MMM d h:mm:ss a',
+    '24h': 'MMM d HH:mm:ss',
+  },
+  short: {
+    '12h': 'MMM d h:mma',
+    '24h': 'MMM d HH:mm',
+  },
+  withMs: {
+    '12h': 'MMM d h:mm:ss.SSS a',
+    '24h': 'MMM d HH:mm:ss.SSS',
+  },
+  time: {
+    '12h': 'h:mm:ss a',
+    '24h': 'HH:mm:ss',
+  },
+};
+
+export const formatDate = (
+  date: Date,
+  {
+    isUTC = false,
+    format = 'normal',
+    clock = '12h',
+  }: {
+    isUTC?: boolean;
+    format?: 'normal' | 'short' | 'withMs' | 'time';
+    clock?: '12h' | '24h';
+  },
+) => {
+  const formatStr = TIME_TOKENS[format][clock];
+
+  return isUTC
+    ? formatInTimeZone(date, 'Etc/UTC', formatStr)
+    : fnsFormat(date, formatStr);
 };

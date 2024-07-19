@@ -1412,18 +1412,18 @@ const buildEventSeriesQuery = async ({
       ? buildSearchColumnName(propertyTypeMappingsModel.get(field), field)
       : '';
 
-  const groupByColumnNames = groupBy.map(g => {
+  const groupByColumnExpressions = groupBy.map(g => {
     const columnName = buildSearchColumnName(
       propertyTypeMappingsModel.get(g),
       g,
     );
     if (columnName != null) {
-      return columnName;
+      return `toString(${columnName})`;
     }
     throw new Error(`Group by field ${g} does not exist`);
   });
 
-  const hasGroupBy = groupByColumnNames.length > 0;
+  const hasGroupBy = groupByColumnExpressions.length > 0;
 
   const serializer = new SQLSerializer(propertyTypeMappingsModel);
 
@@ -1497,11 +1497,13 @@ const buildEventSeriesQuery = async ({
     granularity != null
       ? `toUnixTimestamp(toStartOfInterval(timestamp, INTERVAL ${granularity})) as ts_bucket`
       : "'0' as ts_bucket",
-    hasGroupBy ? `[${groupByColumnNames.join(',')}] as group` : `[] as group`,
+    hasGroupBy
+      ? `[${groupByColumnExpressions.join(',')}] as group`
+      : `[] as group`,
     `${label} as label`,
   ].join(',');
 
-  const groupByClause = ['ts_bucket', ...groupByColumnNames].join(',');
+  const groupByClause = ['ts_bucket', ...groupByColumnExpressions].join(',');
 
   const query = SqlString.format(
     `
@@ -2371,6 +2373,10 @@ export const getSessions = async ({
     ],
   );
 
+  // Filter by the rrweb table if there are any recordings for the session
+  // because session_id is the sort key prefix, it'll be a quick lookup operation
+  // Otherwise we'll want to filter on events in case recordings were
+  // disabled but we still have significant span events
   // Filter by either a record init span, or a visibility span
   // 1. Record init is emitted on SDK initialization and should only happen
   // if there is an actual recording being done for the session (ex. no background sessions)
@@ -2382,6 +2388,12 @@ export const getSessions = async ({
   const sessionsWithRecordingsQuery = SqlString.format(
     `WITH sessions AS (${sessionsWithSearchQuery}),
 sessionIdsWithRecordings AS (
+  SELECT DISTINCT session_id as sessionId
+  FROM ??
+  WHERE (session_id IN (SELECT sessions.sessionId FROM sessions))
+    AND (?)
+),
+sessionIdsWithUserActivity AS (
   SELECT DISTINCT _rum_session_id as sessionId
   FROM ??
   WHERE (span_name='record init' OR span_name='visibility')
@@ -2392,8 +2404,12 @@ SELECT *
 FROM sessions 
 WHERE sessions.sessionId IN (
     SELECT sessionIdsWithRecordings.sessionId FROM sessionIdsWithRecordings
+  ) OR sessions.sessionId IN (
+    SELECT sessionIdsWithUserActivity.sessionId FROM sessionIdsWithUserActivity
   )`,
     [
+      `default.${TableName.Rrweb}`,
+      SqlString.raw(SearchQueryBuilder.timestampInBetween(startTime, endTime)),
       tableName,
       SqlString.raw(SearchQueryBuilder.timestampInBetween(startTime, endTime)),
     ],

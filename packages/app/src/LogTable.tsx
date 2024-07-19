@@ -1,7 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import cx from 'classnames';
-import { format } from 'date-fns';
-import { formatInTimeZone } from 'date-fns-tz';
 import curry from 'lodash/curry';
 import { Button, Modal } from 'react-bootstrap';
 import { CSVLink } from 'react-csv';
@@ -28,12 +26,11 @@ import InstallInstructionsModal from './InstallInstructionsModal';
 import LogLevel from './LogLevel';
 import { useSearchEventStream } from './search';
 import { UNDEFINED_WIDTH } from './tableUtils';
+import { FormatTime } from './useFormatTime';
 import { useUserPreferences } from './useUserPreferences';
 import { useLocalStorage, usePrevious, useWindowSize } from './utils';
-import { TIME_TOKENS } from './utils';
 
 import styles from '../styles/LogTable.module.scss';
-
 type Row = Record<string, any> & { duration: number };
 type AccessorFn = (row: Row, column: string) => any;
 
@@ -45,6 +42,8 @@ const ACCESSOR_MAP: Record<string, AccessorFn> = {
     row.duration >= 0 ? row.duration : SPECIAL_VALUES.not_available,
   default: (row, column) => row[column],
 };
+
+const MAX_SCROLL_FETCH_NEW_PAGE_ATTEMPTS = 20;
 
 function retrieveColumnValue(column: string, row: Row): any {
   const accessor = ACCESSOR_MAP[column] ?? ACCESSOR_MAP.default;
@@ -243,7 +242,7 @@ export const RawLogTable = memo(
       timestamp: string;
     }[];
     isLoading: boolean;
-    fetchNextPage: () => any;
+    fetchNextPage: (arg0?: { cb?: VoidFunction }) => any;
     onRowExpandClick: (id: string, sortKey: string) => void;
     // onPropertySearchClick: (
     //   name: string,
@@ -272,15 +271,13 @@ export const RawLogTable = memo(
     const { width } = useWindowSize();
     const isSmallScreen = (width ?? 1000) < 900;
     const {
-      userPreferences: { timeFormat, isUTC },
+      userPreferences: { isUTC },
     } = useUserPreferences();
-    const tsFormat = TIME_TOKENS[timeFormat];
 
     const [columnSizeStorage, setColumnSizeStorage] = useLocalStorage<
       Record<string, number>
     >(`${tableId}-column-sizes`, {});
 
-    const tsShortFormat = 'HH:mm:ss';
     //once the user has scrolled within 500px of the bottom of the table, fetch more data if there is any
     const FETCH_NEXT_PAGE_PX = 500;
 
@@ -336,13 +333,10 @@ export const RawLogTable = memo(
             const date = new Date(info.getValue<string>());
             return (
               <span className="text-muted">
-                {isUTC
-                  ? formatInTimeZone(
-                      date,
-                      'Etc/UTC',
-                      isSmallScreen ? tsShortFormat : tsFormat,
-                    )
-                  : format(date, isSmallScreen ? tsShortFormat : tsFormat)}
+                <FormatTime
+                  value={date}
+                  format={isSmallScreen ? 'short' : 'withMs'}
+                />
               </span>
             );
           },
@@ -435,7 +429,6 @@ export const RawLogTable = memo(
         columnSizeStorage,
         showServiceColumn,
         columnNameMap,
-        tsFormat,
       ],
     );
 
@@ -522,6 +515,8 @@ export const RawLogTable = memo(
     // Scroll to log id if it's not in window yet
     const [scrolledToHighlightedLine, setScrolledToHighlightedLine] =
       useState(false);
+    const [scrolledToHighlightedLineCount, setScrolledToHighlightedLineCount] =
+      useState(0);
 
     useEffect(() => {
       if (
@@ -534,7 +529,15 @@ export const RawLogTable = memo(
 
       const rowIdx = dedupLogs.findIndex(l => l.id === highlightedLineId);
       if (rowIdx == -1) {
-        fetchNextPage();
+        if (
+          scrolledToHighlightedLineCount < MAX_SCROLL_FETCH_NEW_PAGE_ATTEMPTS
+        ) {
+          fetchNextPage({
+            cb: () => {
+              setScrolledToHighlightedLineCount(prev => prev + 1);
+            },
+          });
+        }
       } else {
         setScrolledToHighlightedLine(true);
         if (
@@ -551,9 +554,8 @@ export const RawLogTable = memo(
       fetchNextPage,
       rowVirtualizer,
       scrolledToHighlightedLine,
-      // Needed to make sure we call this again when the log search loading
-      // state is done to fetch next page
       isLoading,
+      scrolledToHighlightedLineCount,
     ]);
 
     const shiftHighlightedLineId = useCallback(
@@ -926,7 +928,7 @@ export default function LogTable({
         logs={searchResults ?? []}
         isLoading={isLoading}
         fetchNextPage={useCallback(
-          () => fetchNextPage({ limit: 200 }),
+          (args: any) => fetchNextPage({ limit: 200, ...args }),
           [fetchNextPage],
         )}
         // onPropertySearchClick={onPropertySearchClick}

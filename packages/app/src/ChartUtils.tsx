@@ -12,6 +12,7 @@ import {
 import { NumberFormatInput } from './components/NumberFormat';
 import api from './api';
 import Checkbox from './Checkbox';
+import FieldMultiSelect from './FieldMultiSelect';
 import MetricTagFilterInput from './MetricTagFilterInput';
 import SearchInput from './SearchInput';
 import { AggFn, ChartSeries, MetricsDataType, SourceTable } from './types';
@@ -178,6 +179,7 @@ export function seriesColumns({
                 ? series[0].columnWidthPercent
                 : undefined,
             visible: 'visible' in series[0] ? series[0].visible : undefined,
+            color: undefined,
           },
         ]
       : series.map((s, i) => {
@@ -192,6 +194,7 @@ export function seriesColumns({
             columnWidthPercent:
               'columnWidthPercent' in s ? s.columnWidthPercent : undefined,
             visible: 'visible' in s ? s.visible : undefined,
+            color: 'color' in s ? s.color : undefined,
           };
         });
 
@@ -928,12 +931,12 @@ export function ChartSeriesFormCompact({
 }: {
   aggFn: AggFn;
   field: string | undefined;
-  groupBy?: string | undefined;
+  groupBy?: string[] | undefined;
   setAggFn: (fn: AggFn) => void;
   setField: (field: string | undefined) => void;
   setFieldAndAggFn: (field: string | undefined, fn: AggFn) => void;
   setTableAndAggFn?: (table: SourceTable, fn: AggFn) => void;
-  setGroupBy?: (groupBy: string | undefined) => void;
+  setGroupBy?: (groupBy: string[] | undefined) => void;
   setSortOrder?: (sortOrder: SortOrder) => void;
   setWhere: (where: string) => void;
   sortOrder?: string;
@@ -1047,10 +1050,12 @@ export function ChartSeriesFormCompact({
           <div className="d-flex align-items-center">
             <div className="text-muted">Group By</div>
             <div className="ms-3 flex-grow-1" style={{ minWidth: 300 }}>
-              <GroupBySelect
-                groupBy={groupBy}
-                table={table}
-                setGroupBy={setGroupBy}
+              <FieldMultiSelect
+                types={['number', 'bool', 'string']}
+                values={groupBy ?? []}
+                setValues={(values: string[]) => {
+                  setGroupBy(values);
+                }}
               />
             </div>
           </div>
@@ -1091,10 +1096,10 @@ export function ChartSeriesFormCompact({
                 <div className="text-muted fw-500">Group By</div>
                 <div className="ms-3 flex-grow-1" style={{ minWidth: 300 }}>
                   <GroupBySelect
-                    groupBy={groupBy}
+                    groupBy={groupBy?.[0]}
                     fields={field != null ? [field] : []}
                     table={table}
-                    setGroupBy={setGroupBy}
+                    setGroupBy={g => setGroupBy(g != null ? [g] : undefined)}
                   />
                   {/* <MetricTagSelect
                     value={groupBy}

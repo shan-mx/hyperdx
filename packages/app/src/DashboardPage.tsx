@@ -24,6 +24,7 @@ import {
   withDefault,
 } from 'use-query-params';
 import {
+  ActionIcon,
   Badge,
   Box,
   Button as MButton,
@@ -40,6 +41,10 @@ import {
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 
+import { TimePicker } from '@/components/TimePicker';
+
+import { Icon } from './components/Icon';
+import { useDashboardRefresh } from './hooks/useDashboardRefresh';
 import api from './api';
 import { convertDateRangeToGranularityString, Granularity } from './ChartUtils';
 import EditTileForm from './EditTileForm';
@@ -53,13 +58,12 @@ import { dashboardToTerraform, dashboardToTerraformImport } from './iacUtils';
 import { withAppNav } from './layout';
 import { LogTableWithSidePanel } from './LogTableWithSidePanel';
 import SearchInput from './SearchInput';
-import SearchTimeRangePicker from './SearchTimeRangePicker';
 import { FloppyIcon, TerraformFlatIcon } from './SVGIcons';
 import { Tags } from './Tags';
 import { parseTimeQuery, useNewTimeQuery } from './timeQuery';
 import type { Alert, Chart, Dashboard } from './types';
 import { useConfirm } from './useConfirm';
-import { hashCode } from './utils';
+import { hashCode, omit } from './utils';
 import { ZIndexContext } from './zIndex';
 
 import 'react-grid-layout/css/styles.css';
@@ -81,6 +85,53 @@ const buildAndWhereClause = (query1: string, query2: string) => {
   }
 };
 
+const useConfirmExit = ({
+  hasUnsavedChanges,
+}: {
+  hasUnsavedChanges?: boolean;
+}) => {
+  const router = useRouter();
+
+  const handleBeforeUnload = useCallback(
+    (e: BeforeUnloadEvent) => {
+      if (!hasUnsavedChanges) {
+        return;
+      }
+      e.preventDefault();
+      e.returnValue = '';
+    },
+    [hasUnsavedChanges],
+  );
+
+  const handleRouteChangeStart = useCallback(
+    (route: string) => {
+      if (!hasUnsavedChanges || route.startsWith('/dashboards')) {
+        return;
+      }
+      if (
+        window.confirm(
+          'You have unsaved changes. Are you sure you want to leave?',
+        )
+      ) {
+        return;
+      }
+      router.events.emit('routeChangeError');
+      throw 'aborted';
+    },
+    [hasUnsavedChanges, router.events],
+  );
+
+  useEffect(() => {
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    router.events.on('routeChangeStart', handleRouteChangeStart);
+
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      router.events.off('routeChangeStart', handleRouteChangeStart);
+    };
+  }, [handleBeforeUnload, handleRouteChangeStart, router.events]);
+};
+
 const Tile = forwardRef(
   (
     {
@@ -91,6 +142,7 @@ const Tile = forwardRef(
       onEditClick,
       onAddAlertClick,
       onDeleteClick,
+      onUpdateChart,
       query,
       queued,
       onSettled,
@@ -112,6 +164,7 @@ const Tile = forwardRef(
       onEditClick: () => void;
       onAddAlertClick?: () => void;
       onDeleteClick: () => void;
+      onUpdateChart?: (chart: Chart) => void;
       query: string;
       onSettled?: () => void;
       queued?: boolean;
@@ -143,6 +196,7 @@ const Tile = forwardRef(
             dateRange,
             numberFormat: chart.series[0].numberFormat,
             seriesReturnType: chart.seriesReturnType,
+            displayType: chart.series[0].displayType,
             series: chart.series.map(s => ({
               ...s,
               where: buildAndWhereClause(
@@ -332,7 +386,19 @@ const Tile = forwardRef(
               }
             >
               {chart.series[0].type === 'time' && config.type === 'time' && (
-                <HDXMultiSeriesTimeChart config={config} />
+                <HDXMultiSeriesTimeChart
+                  config={config}
+                  setDisplayType={displayType =>
+                    onUpdateChart?.(
+                      produce(chart, draft => {
+                        if (draft.series[0]?.type !== 'time') {
+                          return chart;
+                        }
+                        draft.series[0].displayType = displayType;
+                      }),
+                    )
+                  }
+                />
               )}
               {chart.series[0].type === 'table' && config.type === 'table' && (
                 <HDXMultiSeriesTableChart config={config} />
@@ -568,7 +634,12 @@ function DashboardFilter({
 
 // TODO: This is a hack to set the default time range
 const defaultTimeRange = parseTimeQuery('Past 1h', false) as [Date, Date];
-export default function DashboardPage() {
+
+export default function DashboardPage({
+  presetConfig,
+}: {
+  presetConfig?: Dashboard;
+}) {
   const { data: dashboardsData, isLoading: isDashboardsLoading } =
     api.useDashboards();
   const { data: meData } = api.useMe();
@@ -578,20 +649,25 @@ export default function DashboardPage() {
   const deleteAlert = api.useDeleteAlert();
   const updateAlert = api.useUpdateAlert();
   const router = useRouter();
+
   const { dashboardId, config } = router.query;
+
   const queryClient = useQueryClient();
 
   const confirm = useConfirm();
 
   const [localDashboard, setLocalDashboard] = useQueryParam<Dashboard>(
     'config',
-    withDefault(JsonParam, {
-      id: '',
-      name: 'My New Dashboard',
-      charts: [],
-      alerts: [],
-      query: '',
-    }),
+    withDefault(
+      JsonParam,
+      presetConfig ?? {
+        id: '',
+        name: 'My New Dashboard',
+        charts: [],
+        alerts: [],
+        query: '',
+      },
+    ),
     { updateType: 'pushIn', enableBatching: true },
   );
 
@@ -609,7 +685,7 @@ export default function DashboardPage() {
       );
       return matchedDashboard;
     }
-  }, [dashboardsData, dashboardId, isLocalDashboard, localDashboard]);
+  }, [isLocalDashboard, dashboardsData, localDashboard, dashboardId]);
 
   // Update dashboard
   const [isSavedNow, _setSavedNow] = useState(false);
@@ -688,11 +764,22 @@ export default function DashboardPage() {
     }
   }, [editedChart]);
 
-  const { searchedTimeRange, displayedTimeInputValue, onSearch } =
-    useNewTimeQuery({
-      initialDisplayValue: 'Past 1h',
-      initialTimeRange: defaultTimeRange,
-    });
+  const [isLive, setIsLive] = useState(false);
+
+  const toggleLive = useCallback(() => {
+    setIsLive(prev => !prev);
+  }, []);
+
+  const {
+    searchedTimeRange,
+    displayedTimeInputValue,
+    onSearch,
+    onTimeRangeSelect,
+  } = useNewTimeQuery({
+    initialDisplayValue: 'Past 1h',
+    initialTimeRange: defaultTimeRange,
+    showRelativeInterval: isLive,
+  });
 
   const [input, setInput] = useState<string>(displayedTimeInputValue);
   useEffect(() => {
@@ -728,7 +815,21 @@ export default function DashboardPage() {
     }
   }, [isLocalDashboard, router, dashboard?.charts.length]);
 
+  useConfirmExit({
+    hasUnsavedChanges:
+      isLocalDashboard &&
+      (dashboard?.charts.length || 0) > 0 &&
+      presetConfig == null,
+  });
+
   const [highlightedChartId] = useQueryParam('highlightedChartId');
+
+  const {
+    refresh,
+    manualRefreshCooloff,
+    isRefreshEnabled,
+    granularityOverride,
+  } = useDashboardRefresh({ searchedTimeRange, onTimeRangeSelect, isLive });
 
   const tiles = useMemo(
     () =>
@@ -744,9 +845,27 @@ export default function DashboardPage() {
               setIsAddingAlert(true);
               setEditedChart(chart);
             }}
-            granularity={granularityQuery}
+            granularity={
+              isRefreshEnabled ? granularityOverride : granularityQuery
+            }
             alert={dashboard?.alerts?.find(a => a.chartId === chart.id)}
             isHighlighed={highlightedChartId === chart.id}
+            onUpdateChart={newChart => {
+              if (!dashboard) {
+                return;
+              }
+              setDashboard(
+                produce(dashboard, draft => {
+                  const chartIndex = draft.charts.findIndex(
+                    c => c.id === chart.id,
+                  );
+                  if (chartIndex === -1) {
+                    return;
+                  }
+                  draft.charts[chartIndex] = newChart;
+                }),
+              );
+            }}
             onDuplicateClick={async () => {
               if (dashboard != null) {
                 if (!(await confirm(`Duplicate ${chart.name}?`, 'Duplicate'))) {
@@ -783,6 +902,8 @@ export default function DashboardPage() {
       dashboard,
       dashboardQuery,
       searchedTimeRange,
+      isRefreshEnabled,
+      granularityOverride,
       granularityQuery,
       highlightedChartId,
       confirm,
@@ -896,7 +1017,7 @@ export default function DashboardPage() {
   return (
     <div>
       <Head>
-        <title>Dashboard - HyperDX</title>
+        <title>Dashboard – HyperDX</title>
       </Head>
       {dashboard != null ? (
         <EditTileModal
@@ -969,6 +1090,51 @@ export default function DashboardPage() {
             </div>
           )}
           <div className="d-flex flex-grow-1 justify-content-end">
+            <Tooltip
+              withArrow
+              label={
+                isRefreshEnabled
+                  ? `Auto-refreshing with ${granularityOverride} interval`
+                  : 'Enable auto-refresh'
+              }
+              fz="xs"
+              color="gray"
+            >
+              <MButton
+                color="gray"
+                size="compact-lg"
+                mr={4}
+                variant="subtle"
+                radius="sm"
+                onClick={toggleLive}
+              >
+                {isRefreshEnabled ? (
+                  <Text c="red.6" fz="xs" mr={4}>
+                    <Icon name="record-fill" className="effect-pulse" />
+                  </Text>
+                ) : (
+                  <Text c="gray.7" fz="xs" mr={4}>
+                    <Icon name="record-fill" />
+                  </Text>
+                )}
+                <Text fz="xs" c={isRefreshEnabled ? 'gray.4' : 'gray.6'}>
+                  Live
+                </Text>
+              </MButton>
+            </Tooltip>
+            <ActionIcon
+              onClick={refresh}
+              loading={manualRefreshCooloff}
+              disabled={manualRefreshCooloff}
+              color="gray"
+              mr={6}
+              size="lg"
+              variant="subtle"
+              radius="md"
+              title="Refresh Dashboard"
+            >
+              <Icon name="arrow-clockwise" className="fs-5 text-slate-400" />
+            </ActionIcon>
             <div className="me-2 flex-grow-1" style={{ maxWidth: 450 }}>
               <form
                 className="d-flex align-items-center"
@@ -978,19 +1144,26 @@ export default function DashboardPage() {
                 }}
                 style={{ height: 33 }}
               >
-                <SearchTimeRangePicker
+                <TimePicker
                   inputValue={input}
                   setInputValue={setInput}
                   onSearch={range => {
                     onSearch(range);
                   }}
                 />
-                <div style={{ width: 200 }} className="ms-2">
-                  <GranularityPicker
-                    value={granularityQuery}
-                    onChange={setGranularityQuery}
-                  />
-                </div>
+                <Tooltip
+                  color="gray"
+                  label="Granularity is set to auto while Live mode is enabled"
+                  disabled={!isRefreshEnabled}
+                >
+                  <div style={{ width: 200 }} className="ms-2">
+                    <GranularityPicker
+                      disabled={isRefreshEnabled}
+                      value={isRefreshEnabled ? undefined : granularityQuery}
+                      onChange={setGranularityQuery}
+                    />
+                  </div>
+                </Tooltip>
                 <input
                   type="submit"
                   value="Search Time Range"
@@ -1087,6 +1260,25 @@ export default function DashboardPage() {
                 </Paper>
               </Popover.Dropdown>
             </Popover>
+            {isLocalDashboard === false && dashboard != null && (
+              <Tooltip label="Clone to unsaved dashboard" color="gray">
+                <Button
+                  as="a"
+                  href={`/dashboards/?config=${encodeURIComponent(
+                    JSON.stringify({
+                      ...omit(dashboard, ['createdAt', 'updatedAt']),
+                      id: '',
+                    }),
+                  )}`}
+                  target="_blank"
+                  variant="dark"
+                  className="text-muted-hover-black me-2 text-nowrap"
+                  size="sm"
+                >
+                  <i className="bi bi-copy fs-8"></i>
+                </Button>
+              </Tooltip>
+            )}
             <Button
               variant="outline-success"
               className="text-muted-hover-black me-2 text-nowrap"
@@ -1184,6 +1376,7 @@ export default function DashboardPage() {
             />
           </div>
         )}
+
         {isDashboardsLoading && (
           <div className="d-flex justify-content-center align-items-center">
             Loading Dashboard...

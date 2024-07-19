@@ -1,11 +1,12 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import cx from 'classnames';
-import { add, format } from 'date-fns';
+import { add } from 'date-fns';
 import { withErrorBoundary } from 'react-error-boundary';
 import {
   Bar,
   BarChart,
+  CartesianGrid,
   Label,
   Legend,
   Line,
@@ -20,43 +21,80 @@ import {
 import { Popover } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 
-import api from './api';
+import api, { useMultiSeriesChartV2 } from './api';
 import {
   convertGranularityToSeconds,
   Granularity,
   seriesColumns,
   seriesToUrlSearchQueryParam,
 } from './ChartUtils';
+import type { Dashboard } from './types';
 import type { ChartSeries, NumberFormat } from './types';
-import { useUserPreferences } from './useUserPreferences';
+import { FormatTime, useFormatTime } from './useFormatTime';
 import { formatNumber } from './utils';
-import { semanticKeyedColor, TIME_TOKENS, truncateMiddle } from './utils';
+import { getColorProps, truncateMiddle } from './utils';
 
 import styles from '../styles/HDXLineChart.module.scss';
 
 const MAX_LEGEND_ITEMS = 4;
 
+type TooltipPayload = {
+  dataKey: string;
+  name: string;
+  value: number;
+  color?: string;
+  stroke?: string;
+  strokeWidth?: number;
+  strokeDasharray?: string;
+  opacity?: number;
+};
+
+export const TooltipItem = memo(
+  ({ p, numberFormat }: { p: TooltipPayload; numberFormat?: NumberFormat }) => {
+    return (
+      <div className="d-flex gap-2 items-center justify-center">
+        <div>
+          <svg width="12" height="4">
+            <line
+              x1="0"
+              y1="2"
+              x2="12"
+              y2="2"
+              stroke={p.color}
+              opacity={p.opacity}
+              strokeDasharray={p.strokeDasharray}
+            />
+          </svg>
+        </div>
+        <div>
+          <span style={{ color: p.color }}>
+            {truncateMiddle(p.name ?? p.dataKey, 50)}
+          </span>
+          : {numberFormat ? formatNumber(p.value, numberFormat) : p.value}
+        </div>
+      </div>
+    );
+  },
+);
+
 const HDXLineChartTooltip = withErrorBoundary(
   memo((props: any) => {
-    const {
-      userPreferences: { timeFormat },
-    } = useUserPreferences();
-    const tsFormat = TIME_TOKENS[timeFormat];
     const { active, payload, label, numberFormat } = props;
     if (active && payload && payload.length) {
       return (
         <div className={styles.chartTooltip}>
           <div className={styles.chartTooltipHeader}>
-            {format(new Date(label * 1000), tsFormat)}
+            <FormatTime value={label * 1000} />
           </div>
           <div className={styles.chartTooltipContent}>
             {payload
               .sort((a: any, b: any) => b.value - a.value)
               .map((p: any) => (
-                <div key={p.dataKey} style={{ color: p.color }}>
-                  {truncateMiddle(p.name ?? p.dataKey, 70)}:{' '}
-                  {numberFormat ? formatNumber(p.value, numberFormat) : p.value}
-                </div>
+                <TooltipItem
+                  key={p.dataKey}
+                  p={p}
+                  numberFormat={numberFormat}
+                />
               ))}
           </div>
         </div>
@@ -86,8 +124,22 @@ function CopyableLegendItem({ entry }: any) {
       }}
       title="Click to expand"
     >
-      <i className="bi bi-circle-fill me-1" style={{ fontSize: 6 }} />
-      {entry.value}
+      <div className="d-flex gap-1 items-center justify-center">
+        <div>
+          <svg width="12" height="4">
+            <line
+              x1="0"
+              y1="2"
+              x2="12"
+              y2="2"
+              stroke={entry.color}
+              opacity={entry.opacity}
+              strokeDasharray={entry.payload?.strokeDasharray}
+            />
+          </svg>
+        </div>
+        {entry.value}
+      </div>
     </span>
   );
 }
@@ -98,13 +150,25 @@ function ExpandableLegendItem({ entry, expanded }: any) {
 
   return (
     <span
-      className={styles.legendItem}
+      className={`d-flex gap-1 items-center justify-center ${styles.legendItem}`}
       style={{ color: entry.color }}
       role="button"
       onClick={() => setExpanded(v => !v)}
       title="Click to expand"
     >
-      <i className="bi bi-circle-fill me-1" style={{ fontSize: 6 }} />
+      <div>
+        <svg width="12" height="4">
+          <line
+            x1="0"
+            y1="2"
+            x2="12"
+            y2="2"
+            stroke={entry.color}
+            opacity={entry.opacity}
+            strokeDasharray={entry.payload?.strokeDasharray}
+          />
+        </svg>
+      </div>
       {isExpanded ? entry.value : truncateMiddle(`${entry.value}`, 35)}
     </span>
   );
@@ -117,6 +181,7 @@ export const LegendRenderer = memo<{
   }[];
 }>(props => {
   const payload = props.payload ?? [];
+
   const shownItems = payload.slice(0, MAX_LEGEND_ITEMS);
   const restItems = payload.slice(MAX_LEGEND_ITEMS);
 
@@ -161,11 +226,13 @@ const MemoChart = memo(function MemoChart({
   dateRange,
   groupKeys,
   lineNames,
+  lineColors,
   alertThreshold,
   alertThresholdType,
   logReferenceTimestamp,
   displayType = 'line',
   numberFormat,
+  isLoading,
 }: {
   graphResults: any[];
   setIsClickActive: (v: any) => void;
@@ -173,11 +240,13 @@ const MemoChart = memo(function MemoChart({
   dateRange: [Date, Date] | Readonly<[Date, Date]>;
   groupKeys: string[];
   lineNames: string[];
+  lineColors: Array<string | undefined>;
   alertThreshold?: number;
   alertThresholdType?: 'above' | 'below';
   displayType?: 'stacked_bar' | 'line';
   numberFormat?: NumberFormat;
   logReferenceTimestamp?: number;
+  isLoading?: boolean;
 }) {
   const ChartComponent = displayType === 'stacked_bar' ? BarChart : LineChart;
 
@@ -192,14 +261,24 @@ const MemoChart = memo(function MemoChart({
       return acc;
     }, {});
 
-    return limitedGroupKeys.map((key, i) =>
-      displayType === 'stacked_bar' ? (
+    return limitedGroupKeys.map((key, i) => {
+      const {
+        color: _color,
+        opacity,
+        strokeDasharray,
+        strokeWidth,
+      } = getColorProps(i, lineNames[i] ?? key);
+
+      const color = lineColors[i] ?? _color;
+
+      return displayType === 'stacked_bar' ? (
         <Bar
           key={key}
           type="monotone"
           dataKey={key}
           name={lineNames[i] ?? key}
-          fill={semanticKeyedColor(lineNames[i] ?? key)}
+          fill={color}
+          opacity={opacity}
           stackId="1"
         />
       ) : (
@@ -208,22 +287,28 @@ const MemoChart = memo(function MemoChart({
           type="monotone"
           dataKey={key}
           name={lineNames[i] ?? key}
-          stroke={semanticKeyedColor(lineNames[i] ?? key)}
+          stroke={color}
           dot={
             isContinuousGroup[key] === false ? { strokeWidth: 2, r: 1 } : false
           }
+          strokeWidth={strokeWidth}
+          strokeDasharray={strokeDasharray}
           isAnimationActive={false}
+          opacity={opacity}
         />
-      ),
-    );
-  }, [groupKeys, displayType, lineNames, graphResults]);
+      );
+    });
+  }, [groupKeys, graphResults, displayType, lineNames, lineColors]);
 
   const sizeRef = useRef<[number, number]>([0, 0]);
-  const {
-    userPreferences: { timeFormat },
-  } = useUserPreferences();
-  const tsFormat = TIME_TOKENS[timeFormat];
-  // Gets the preffered time format from User Preferences, then converts it to a formattable token
+
+  const formatTime = useFormatTime();
+  const xTickFormatter = useCallback(
+    (value: number) => {
+      return formatTime(value * 1000);
+    },
+    [formatTime],
+  );
 
   const tickFormatter = useCallback(
     (value: number) =>
@@ -249,6 +334,7 @@ const MemoChart = memo(function MemoChart({
       onResize={(width, height) => {
         sizeRef.current = [width ?? 1, height ?? 1];
       }}
+      className={isLoading ? 'effect-pulse' : ''}
     >
       <ChartComponent
         width={500}
@@ -279,6 +365,10 @@ const MemoChart = memo(function MemoChart({
           e.stopPropagation();
         }}
       >
+        <CartesianGrid
+          strokeDasharray="3 3"
+          stroke="var(--mantine-color-gray-8)"
+        />
         <XAxis
           dataKey={'ts_bucket'}
           domain={[
@@ -288,7 +378,7 @@ const MemoChart = memo(function MemoChart({
           interval="preserveStartEnd"
           scale="time"
           type="number"
-          tickFormatter={tick => format(new Date(tick * 1000), tsFormat)}
+          tickFormatter={xTickFormatter}
           minTickGap={50}
           tick={{ fontSize: 12, fontFamily: 'IBM Plex Mono, monospace' }}
         />
@@ -352,12 +442,18 @@ const MemoChart = memo(function MemoChart({
 
 const HDXMultiSeriesTimeChart = memo(
   ({
-    config: { series, granularity, dateRange, seriesReturnType = 'column' },
+    config: {
+      series,
+      granularity,
+      dateRange,
+      seriesReturnType = 'column',
+      displayType: displayTypeProp = 'line',
+    },
     onSettled,
     alertThreshold,
     alertThresholdType,
     showDisplaySwitcher = true,
-    defaultDisplayType = 'line',
+    setDisplayType,
     logReferenceTimestamp,
   }: {
     config: {
@@ -365,15 +461,16 @@ const HDXMultiSeriesTimeChart = memo(
       granularity: Granularity;
       dateRange: [Date, Date] | Readonly<[Date, Date]>;
       seriesReturnType: 'ratio' | 'column';
+      displayType?: 'stacked_bar' | 'line';
     };
     onSettled?: () => void;
     alertThreshold?: number;
     alertThresholdType?: 'above' | 'below';
     showDisplaySwitcher?: boolean;
-    defaultDisplayType?: 'stacked_bar' | 'line';
+    setDisplayType?: (type: 'stacked_bar' | 'line') => void;
     logReferenceTimestamp?: number;
   }) => {
-    const { data, isError, isLoading } = api.useMultiSeriesChart(
+    const { data, isError, isLoading } = useMultiSeriesChartV2(
       {
         series,
         granularity,
@@ -406,6 +503,7 @@ const HDXMultiSeriesTimeChart = memo(
       [seriesGroup: string]: {
         dataKey: string;
         displayName: string;
+        color?: string;
       };
     } = {};
 
@@ -440,10 +538,13 @@ const HDXMultiSeriesTimeChart = memo(
                 : // Otherwise, show the series and a group if there is any
                   `${hasGroup ? `${row.group} • ` : ''}${meta.displayName}`;
 
+            const color = meta.color;
+
             acc[dataKey] = row[meta.dataKey];
             lineDataMap[dataKey] = {
               dataKey,
               displayName,
+              color,
             };
             return acc;
           }, {} as any),
@@ -457,6 +558,7 @@ const HDXMultiSeriesTimeChart = memo(
 
     const groupKeys = Object.values(lineDataMap).map(s => s.dataKey);
     const lineNames = Object.values(lineDataMap).map(s => s.displayName);
+    const lineColors = Object.values(lineDataMap).map(s => s.color);
 
     const [activeClickPayload, setActiveClickPayload] = useState<
       | {
@@ -499,11 +601,26 @@ const HDXMultiSeriesTimeChart = memo(
     const numberFormat =
       series[0].type === 'time' ? series[0]?.numberFormat : undefined;
 
-    const [displayType, setDisplayType] = useState<'stacked_bar' | 'line'>(
-      defaultDisplayType,
-    );
+    // To enable backward compatibility, allow non-controlled usage of displayType
+    const [displayTypeLocal, setDisplayTypeLocal] = useState(displayTypeProp);
 
-    return isLoading ? (
+    const displayType = useMemo(() => {
+      if (setDisplayType) {
+        return displayTypeProp;
+      } else {
+        return displayTypeLocal;
+      }
+    }, [displayTypeLocal, displayTypeProp, setDisplayType]);
+
+    const handleSetDisplayType = (type: 'stacked_bar' | 'line') => {
+      if (setDisplayType) {
+        setDisplayType(type);
+      } else {
+        setDisplayTypeLocal(type);
+      }
+    };
+
+    return isLoading && !data ? (
       <div className="d-flex h-100 w-100 align-items-center justify-content-center text-muted">
         Loading Chart Data...
       </div>
@@ -554,7 +671,7 @@ const HDXMultiSeriesTimeChart = memo(
                 href={`/search?${qparams?.toString()}`}
                 className="text-white-hover text-decoration-none"
               >
-                <i className="bi bi-search"></i>View Events
+                <i className="bi bi-search me-1"></i> View Events
               </Link>
             </div>
           ) : null}
@@ -596,7 +713,7 @@ const HDXMultiSeriesTimeChart = memo(
                 })}
                 role="button"
                 title="Display as line chart"
-                onClick={() => setDisplayType('line')}
+                onClick={() => handleSetDisplayType('line')}
               >
                 <i className="bi bi-graph-up"></i>
               </span>
@@ -607,14 +724,16 @@ const HDXMultiSeriesTimeChart = memo(
                 })}
                 role="button"
                 title="Display as bar chart"
-                onClick={() => setDisplayType('stacked_bar')}
+                onClick={() => handleSetDisplayType('stacked_bar')}
               >
                 <i className="bi bi-bar-chart"></i>
               </span>
             </div>
           )}
           <MemoChart
+            isLoading={isLoading}
             lineNames={lineNames}
+            lineColors={lineColors}
             graphResults={graphResults}
             groupKeys={groupKeys}
             isClickActive={activeClickPayload}

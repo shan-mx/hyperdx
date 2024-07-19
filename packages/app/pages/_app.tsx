@@ -3,6 +3,7 @@ import type { NextPage } from 'next';
 import type { AppProps } from 'next/app';
 import Head from 'next/head';
 import { NextAdapter } from 'next-query-params';
+import { enableMapSet } from 'immer';
 import SSRProvider from 'react-bootstrap/SSRProvider';
 import { QueryClient, QueryClientProvider } from 'react-query';
 import { ReactQueryDevtools } from 'react-query/devtools';
@@ -10,17 +11,19 @@ import { QueryParamProvider } from 'use-query-params';
 import HyperDX from '@hyperdx/browser';
 import { ColorSchemeScript } from '@mantine/core';
 
-import { apiConfigs } from '../src/api';
-import { ThemeWrapper } from '../src/ThemeWrapper';
-import { useConfirmModal } from '../src/useConfirm';
-import { QueryParamProvider as HDXQueryParamProvider } from '../src/useQueryParam';
-import { useBackground, useUserPreferences } from '../src/useUserPreferences';
+import { apiConfigs } from '@/api';
+import { ThemeWrapper } from '@/ThemeWrapper';
+import { useConfirmModal } from '@/useConfirm';
+import { QueryParamProvider as HDXQueryParamProvider } from '@/useQueryParam';
+import { useBackground, useUserPreferences } from '@/useUserPreferences';
 
 import '@mantine/core/styles.css';
 import '@mantine/notifications/styles.css';
-import '../styles/globals.css';
-import '../styles/app.scss';
-import '../src/LandingPage.scss';
+import '@mantine/dates/styles.css';
+import '@styles/globals.css';
+import '@styles/app.scss';
+
+enableMapSet();
 
 const queryClient = new QueryClient();
 
@@ -123,7 +126,10 @@ export default function MyApp({ Component, pageProps }: AppPropsWithLayout) {
               <ThemeWrapper fontFamily={userPreferences.font}>
                 {getLayout(<Component {...pageProps} />)}
               </ThemeWrapper>
-              <ReactQueryDevtools initialIsOpen={false} />
+              <ReactQueryDevtools
+                initialIsOpen={false}
+                position="bottom-right"
+              />
               {confirmModal}
               {background}
             </QueryClientProvider>

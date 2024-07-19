@@ -2,12 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/router';
 import cx from 'classnames';
-import { add, format, sub } from 'date-fns';
+import { add, format, min, sub } from 'date-fns';
 import Fuse from 'fuse.js';
 import get from 'lodash/get';
 import isPlainObject from 'lodash/isPlainObject';
 import pickBy from 'lodash/pickBy';
-import { OverlayTrigger, Tooltip } from 'react-bootstrap';
 import Button from 'react-bootstrap/Button';
 import CopyToClipboard from 'react-copy-to-clipboard';
 import { ErrorBoundary } from 'react-error-boundary';
@@ -20,14 +19,18 @@ import Timestamp from 'timestamp-nano';
 import { useQueryParam } from 'use-query-params';
 import {
   ActionIcon,
+  Alert,
   Box,
+  Button as MButton,
   Card,
   Group,
   Menu,
+  Popover,
   ScrollArea,
   SegmentedControl,
   SimpleGrid,
   Stack,
+  Text,
   TextInput,
 } from '@mantine/core';
 import { useClickOutside } from '@mantine/hooks';
@@ -43,6 +46,8 @@ import {
   K8S_MEM_NUMBER_FORMAT,
 } from './ChartUtils';
 import { CurlGenerator } from './curlGenerator';
+import { getFirstFrame, parseEvents } from './ExceptionsPage';
+import Icon from './Icon';
 import LogLevel from './LogLevel';
 import {
   breadcrumbColumns,
@@ -52,6 +57,7 @@ import {
   NetworkBody,
   networkColumns,
   SectionWrapper,
+  SourceMapsFtux,
   stacktraceColumns,
   StacktraceValue,
   useShowMoreRows,
@@ -63,6 +69,7 @@ import TimelineChart from './TimelineChart';
 import { dateRangeToString } from './timeQuery';
 import type { StacktraceBreadcrumb, StacktraceFrame } from './types';
 import { Dictionary } from './types';
+import { FormatTime } from './useFormatTime';
 import {
   formatDistanceToNowStrictShort,
   useFirstNonNullValue,
@@ -71,7 +78,6 @@ import {
 } from './utils';
 import { useZIndex, ZIndexContext } from './zIndex';
 
-import 'react-bootstrap-range-slider/dist/react-bootstrap-range-slider.css';
 import 'react-modern-drawer/dist/index.css';
 import styles from '../styles/LogSidePanel.module.scss';
 
@@ -129,6 +135,9 @@ function useParsedLogProperties(logData: any): { [key: string]: any } {
     };
   }, [logData]);
 }
+
+const getLogProperty = (log: any, key: string) =>
+  log?.['string.values']?.[log?.['string.names']?.indexOf(key)];
 
 function useTraceSpans(
   {
@@ -218,7 +227,9 @@ function useTraceSpansAroundHighlight({
   const hasHighlightedResult = initialHighlightedResult != null;
   const aboveSpanEndDate =
     initialHighlightedResult != null
-      ? new Date(Number.parseInt(initialHighlightedResult.sortKey.slice(0, 13)))
+      ? new Date(
+          Number.parseInt(initialHighlightedResult.sortKey?.slice(0, 13)),
+        )
       : dateRange[1] ?? new Date();
 
   const { data: aboveSpanData, isFetching: isAboveSpanFetching } =
@@ -245,7 +256,7 @@ function useTraceSpansAroundHighlight({
         limit: 1500,
       },
       {
-        enabled: hasHighlightedResult,
+        enabled: (enabled ?? true) && hasHighlightedResult,
       },
     );
 
@@ -376,13 +387,9 @@ function TraceChart({
       id: result.id,
       label: (
         <div
-          className={`${
-            isHighlighted
-              ? 'text-success'
-              : isError
-              ? 'text-danger'
-              : 'text-muted-hover'
-          } text-truncate cursor-pointer`}
+          className={`${isError && 'text-danger'} ${
+            isHighlighted && styles.traceTimelineLabelHighlighted
+          } text-truncate cursor-pointer ps-2 ${styles.traceTimelineLabel}`}
           role="button"
           onClick={() => {
             onClick(result.id, result.sort_key);
@@ -390,12 +397,12 @@ function TraceChart({
         >
           {result._platform === 'sentry' ? (
             <i
-              className="bi bi-bug text-gray-600 fs-8 me-2 align-middle"
+              className="bi bi-bug fs-8 me-2 align-middle"
               title="Correlated Exception"
             />
           ) : result.type === 'log' ? (
             <i
-              className="bi bi-card-text text-gray-600 fs-8 me-2 align-middle"
+              className="bi bi-card-text fs-8 me-2 align-middle"
               title="Correlated Log Line"
             />
           ) : null}
@@ -403,8 +410,9 @@ function TraceChart({
         </div>
       ),
       style: {
-        paddingTop: i === 0 ? 32 : 4,
-        paddingBottom: 4,
+        paddingTop: 1,
+        marginTop: i === 0 ? 32 : 0,
+        backgroundColor: isHighlighted ? '#202127' : undefined,
       },
       events: [
         {
@@ -414,17 +422,14 @@ function TraceChart({
           tooltip: `${result.body} ${
             tookMs >= 0 ? `took ${tookMs.toFixed(4)}ms` : ''
           }`,
-          color: isHighlighted ? '#50FA7B' : isError ? '#dc3545' : '#21262C',
-          body: (
-            <span
-              className={cx({
-                'text-dark': isHighlighted,
-                'text-white': !isHighlighted,
-              })}
-            >
-              {result.body}
-            </span>
-          ),
+          color: isError
+            ? isHighlighted
+              ? '#FF6E6E'
+              : '#f53749'
+            : isHighlighted
+            ? '#A9AFB7'
+            : '#6a7077',
+          body: <span style={{ color: '#FFFFFFEE' }}>{result.body}</span>,
           minWidthPerc: 1,
         },
       ],
@@ -453,7 +458,7 @@ function TraceChart({
           // setScale={setScale}
           // scaleWithScroll={scrollToZoom}
           // maxVal={maxVal}
-          rowHeight={24}
+          rowHeight={22}
           labelWidth={240}
           onClick={ts => {
             // onTimeClick(ts + startedAt);
@@ -495,7 +500,7 @@ function isExceptionSpan({ logData }: { logData: any }) {
   );
 }
 
-function TraceSubpanel({
+export function TraceSubpanel({
   logData,
   onClose,
   onPropertyAddClick,
@@ -604,45 +609,54 @@ function TraceSubpanel({
 
   return (
     <>
-      <form
-        className="mb-1"
-        style={{ zIndex: 100 }}
-        onSubmit={e => {
-          e.preventDefault();
-          setSearchedQuery(inputQuery);
-        }}
-      >
-        <SearchInput
-          inputRef={inputRef}
-          value={inputQuery}
-          onChange={value => setInputQuery(value)}
-          onSearch={() => {}}
-          placeholder="Filter spans by name, property, etc..."
-          showHotkey={false}
-          size="sm"
-        />
-        <button
-          type="submit"
-          style={{
-            width: 0,
-            height: 0,
-            border: 0,
-            padding: 0,
+      <Card bg="dark.10">
+        <Card.Section withBorder px="md" py={8}>
+          <Group>
+            <Text size="sm" fw="bold">
+              Trace
+            </Text>
+            <form
+              style={{ zIndex: 100, flex: 1 }}
+              onSubmit={e => {
+                e.preventDefault();
+                setSearchedQuery(inputQuery);
+              }}
+            >
+              <SearchInput
+                inputRef={inputRef}
+                value={inputQuery}
+                onChange={value => setInputQuery(value)}
+                onSearch={() => {}}
+                placeholder="Filter spans by name, property, etc..."
+                showHotkey={false}
+                size="sm"
+              />
+              <button
+                type="submit"
+                style={{
+                  width: 0,
+                  height: 0,
+                  border: 0,
+                  padding: 0,
+                  display: 'none',
+                }}
+              />
+            </form>
+          </Group>
+        </Card.Section>
+        <TraceChart
+          config={{
+            where: `trace_id:"${logData.trace_id}" ${searchedQuery}`,
+            dateRange: [start, end],
+          }}
+          highlightedResult={selectedLog}
+          onClick={(id, sortKey) => {
+            setSelectedLog({ id, sortKey });
           }}
         />
-      </form>
-      <TraceChart
-        config={{
-          where: `trace_id:"${logData.trace_id}" ${searchedQuery}`,
-          dateRange: [start, end],
-        }}
-        highlightedResult={selectedLog}
-        onClick={(id, sortKey) => {
-          setSelectedLog({ id, sortKey });
-        }}
-      />
+      </Card>
 
-      <div className="border-top border-dark mb-4">
+      <div className="mb-4">
         {selectedLogData != null ? (
           <>
             <div className="my-3 text-break">
@@ -664,10 +678,7 @@ function TraceSubpanel({
                 </>
               )}
               <span className="text-muted">at</span>{' '}
-              {format(
-                new Date(selectedLogData.timestamp),
-                'MMM d HH:mm:ss.SSS',
-              )}
+              <FormatTime value={selectedLogData.timestamp} format="withMs" />
             </div>
             {isNetworkRequestSpan({ logData: selectedLogData }) && (
               <ErrorBoundary
@@ -700,11 +711,13 @@ function TraceSubpanel({
                   </div>
                 )}
               >
-                <ExceptionSubpanel
-                  breadcrumbs={exceptionBreadcrumbs}
-                  exceptionValues={exceptionValues}
-                  logData={selectedLogData}
-                />
+                <CollapsibleSection title="Stack Trace">
+                  <ExceptionSubpanel
+                    breadcrumbs={exceptionBreadcrumbs}
+                    exceptionValues={exceptionValues}
+                    logData={selectedLogData}
+                  />
+                </CollapsibleSection>
               </ErrorBoundary>
             )}
             {!isSelectedLogDataException && (
@@ -780,59 +793,68 @@ function EventTag({
   onPropertyAddClick?: (key: string, value: string) => void;
   generateSearchUrl: (query?: string, timeRange?: [Date, Date]) => string;
 }) {
+  const [opened, setOpened] = useState(false);
+
   return (
-    <OverlayTrigger
-      key={name}
-      trigger="click"
-      overlay={
-        <Tooltip id={`tooltip`}>
-          <span className="me-2" />
-          {onPropertyAddClick != null ? (
-            <Button
-              className="p-0 fs-8 text-muted-hover child-hover-trigger me-2"
-              variant="link"
-              title="Add to search"
+    <Popover
+      position="top"
+      withinPortal={false}
+      withArrow
+      opened={opened}
+      onChange={setOpened}
+    >
+      <Popover.Target>
+        <div
+          key={name}
+          className="text-muted-hover bg-hdx-dark px-2 py-0.5 me-1 my-1 cursor-pointer"
+          onClick={() => setOpened(!opened)}
+        >
+          {displayedKey || name}
+          {': '}
+          {value}
+        </div>
+      </Popover.Target>
+      <Popover.Dropdown p={2}>
+        <Stack gap={0} justify="stretch">
+          {onPropertyAddClick ? (
+            <MButton
+              justify="space-between"
+              color="gray"
+              variant="subtle"
+              size="xs"
+              rightSection={<i className="bi bi-plus-circle" />}
               onClick={() => {
                 onPropertyAddClick(name, value);
+                setOpened(false);
               }}
             >
-              <i className="bi bi-plus-circle" /> Add to Search
-            </Button>
+              Add to Search
+            </MButton>
           ) : null}
-          <span>
-            <Link
-              href={generateSearchUrl(
-                `${name}:${typeof value === 'string' ? `"${value}"` : value}`,
-              )}
-              passHref
-              legacyBehavior
+          <Link
+            href={generateSearchUrl(
+              `${name}:${typeof value === 'string' ? `"${value}"` : value}`,
+            )}
+            passHref
+            legacyBehavior
+          >
+            <MButton
+              justify="space-between"
+              color="gray"
+              variant="subtle"
+              size="xs"
+              rightSection={<i className="bi bi-search" />}
             >
-              <Button
-                className="fs-8 text-muted-hover child-hover-trigger py-0"
-                variant="link"
-                as="a"
-                title="Search for this value only"
-              >
-                <i className="bi bi-search" /> Search This Value
-              </Button>
-            </Link>
-          </span>
-        </Tooltip>
-      }
-    >
-      <div
-        key={name}
-        className="text-muted-hover bg-hdx-dark px-2 py-0.5 me-1 my-1 cursor-pointer"
-      >
-        {displayedKey || name}
-        {': '}
-        {value}
-      </div>
-    </OverlayTrigger>
+              Search This Value
+            </MButton>
+          </Link>
+        </Stack>
+      </Popover.Dropdown>
+    </Popover>
   );
 }
 
-function EventTagSubpanel({
+export function EventTagSubpanel({
   generateSearchUrl,
   logData,
   onPropertyAddClick,
@@ -908,24 +930,99 @@ function ExceptionEvent({
 }) {
   const isMessageInStacktrace = stacktrace?.includes(message ?? '');
 
+  const parsedStacktrace = useMemo(() => {
+    try {
+      return JSON.parse(stacktrace ?? '') as { frames: StacktraceFrame[] };
+    } catch (e) {
+      return null;
+    }
+  }, [stacktrace]);
+
+  const stacktraceFrames = useMemo(() => {
+    if (!parsedStacktrace?.frames) {
+      return [];
+    }
+    return parsedStacktrace.frames.slice().reverse();
+  }, [parsedStacktrace]);
+
+  const firstFrameIndex = useMemo(() => {
+    const firstFrame = getFirstFrame(stacktraceFrames);
+    return firstFrame ? stacktraceFrames.indexOf(firstFrame) : -1;
+  }, [stacktraceFrames]);
+
+  const {
+    handleToggleMoreRows: handleStacktraceToggleMoreRows,
+    hiddenRowsCount: stacktraceHiddenRowsCount,
+    visibleRows: stacktraceVisibleRows,
+    isExpanded: stacktraceExpanded,
+  } = useShowMoreRows({
+    rows: stacktraceFrames,
+  });
+
   return (
-    <div className="my-3">
-      <div className="fw-bold text-danger mb-1">{type}</div>
-      {message != null && isMessageInStacktrace === false && (
-        <div>{message}</div>
+    <Card my="lg">
+      <Card.Section withBorder p="md">
+        <div className="fw-bold text-danger">{type}</div>
+        {message != null && isMessageInStacktrace === false && (
+          <div>{message}</div>
+        )}
+      </Card.Section>
+      {stacktraceFrames?.length > 0 ? (
+        <Card.Section>
+          <ErrorBoundary
+            onError={err => {
+              console.error(err);
+            }}
+            fallbackRender={() => (
+              <div className="text-danger px-2 py-1 m-2 fs-7 font-monospace bg-danger-transparent p-4">
+                An error occurred while rendering stacktrace
+              </div>
+            )}
+          >
+            <Table
+              hideHeader
+              columns={stacktraceColumns}
+              data={stacktraceVisibleRows}
+              density="zero"
+            />
+          </ErrorBoundary>
+          {stacktraceHiddenRowsCount ? (
+            <Button
+              variant="dark"
+              className="text-muted-hover fs-8 mx-4 mt-1 mb-3"
+              size="sm"
+              as="a"
+              onClick={handleStacktraceToggleMoreRows}
+            >
+              {stacktraceExpanded ? (
+                <>
+                  <i className="bi bi-chevron-up me-2" /> Hide stack trace
+                </>
+              ) : (
+                <>
+                  <i className="bi bi-chevron-down me-2" />
+                  Show {stacktraceHiddenRowsCount} more frames
+                </>
+              )}
+            </Button>
+          ) : null}
+        </Card.Section>
+      ) : (
+        stacktrace != null && (
+          <Card.Section p="md">
+            <pre
+              className="d-inline text-break text-muted"
+              style={{
+                whiteSpace: 'pre-wrap',
+                wordWrap: 'break-word',
+              }}
+            >
+              {stacktrace}
+            </pre>
+          </Card.Section>
+        )
       )}
-      {stacktrace != null && (
-        <pre
-          className="d-inline text-break text-muted"
-          style={{
-            whiteSpace: 'pre-wrap',
-            wordWrap: 'break-word',
-          }}
-        >
-          {stacktrace}
-        </pre>
-      )}
-    </div>
+    </Card>
   );
 }
 
@@ -1302,6 +1399,13 @@ function PropertySubpanel({
       !key.startsWith('otel.library.') &&
       !key.startsWith('telemetry.') &&
       !key.startsWith('hyperdx.') &&
+      // We need to show exception properties if it's an exception log, which
+      // has exception.* at the top-level. We're using the existence of span events as a
+      // proxy for this behavior for now.
+      !(
+        key.startsWith('exception.') &&
+        getLogProperty(logData, '__events') != null
+      ) &&
       !(key.startsWith('http.request.header.') && isNetworkReq) &&
       !(key.startsWith('http.response.header.') && isNetworkReq) &&
       key != '__events' &&
@@ -1521,6 +1625,27 @@ function PropertySubpanel({
     ],
   );
 
+  const exceptionValues = useMemo<ExceptionValues | undefined>(() => {
+    const __events = getLogProperty(logData, '__events');
+
+    const parsedEvents = parseEvents(__events);
+    const stacktrace =
+      parsedEvents?.['exception.stacktrace'] ||
+      parsedEvents?.['exception.parsed_stacktrace'];
+
+    return [
+      {
+        stacktrace,
+        type: parsedEvents?.['exception.type'],
+        value:
+          typeof parsedEvents?.['exception.message'] !== 'string'
+            ? JSON.stringify(parsedEvents?.['exception.message'])
+            : parsedEvents?.['exception.message'],
+        mechanism: parsedEvents?.['exception.mechanism'],
+      },
+    ];
+  }, [logData]);
+
   return (
     <div>
       {events != null && events.length > 0 && (
@@ -1545,20 +1670,16 @@ function PropertySubpanel({
                     Object.keys(eventObj).length === 1,
                 })}
               >
-                <div className="text-muted mt-3 mb-1">
+                <div className="text-muted mt-2 mb-1">
                   {isException && (
                     <span className="text-danger me-2">Exception</span>
                   )}
-                  {format(
-                    new Date(event.timestamp / 1000),
-                    'MMM d HH:mm:ss.SSS',
-                  )}
+                  <FormatTime value={event.timestamp / 1000} format="withMs" />
                 </div>
-                {isException ? (
-                  <ExceptionEvent
-                    type={eventObj['exception.type']}
-                    message={eventObj['exception.message']}
-                    stacktrace={eventObj['exception.stacktrace']}
+                {isException && exceptionValues ? (
+                  <ExceptionSubpanel
+                    exceptionValues={exceptionValues}
+                    logData={logData}
                   />
                 ) : (
                   <JSONTree
@@ -1755,42 +1876,40 @@ function PropertySubpanel({
                     : get(nestedProperties, parsedKeyPath);
 
                   return (
-                    <OverlayTrigger
-                      trigger="click"
-                      overlay={
-                        <Tooltip id={`tooltip`}>
-                          <CopyToClipboard
-                            text={JSON.stringify(copiedObj, null, 2)}
-                            onCopy={() => {
-                              notifications.show({
-                                color: 'green',
-                                message: `${
-                                  shouldCopyParent ? 'Parent object' : 'Object'
-                                } copied to clipboard`,
-                              });
-                            }}
+                    <Popover withinPortal={false}>
+                      <Popover.Target>
+                        <span className="cursor-pointer">{key}</span>
+                      </Popover.Target>
+                      <Popover.Dropdown>
+                        <CopyToClipboard
+                          text={JSON.stringify(copiedObj, null, 2)}
+                          onCopy={() => {
+                            notifications.show({
+                              color: 'green',
+                              message: `${
+                                shouldCopyParent ? 'Parent object' : 'Object'
+                              } copied to clipboard`,
+                            });
+                          }}
+                        >
+                          <Button
+                            className="p-0 fs-8 text-muted-hover child-hover-trigger me-2"
+                            variant="link"
+                            title={`Copy ${
+                              shouldCopyParent ? 'parent' : ''
+                            } object`}
                           >
-                            <Button
-                              className="p-0 fs-8 text-muted-hover child-hover-trigger me-2"
-                              variant="link"
-                              title={`Copy ${
-                                shouldCopyParent ? 'parent' : ''
-                              } object`}
-                            >
-                              <i className="bi bi-clipboard" /> Copy{' '}
-                              {shouldCopyParent ? 'Parent ' : ''}Object (
-                              {(shouldCopyParent
-                                ? parentKeyPath
-                                : parsedKeyPath
-                              ).join('.')}
-                              )
-                            </Button>
-                          </CopyToClipboard>
-                        </Tooltip>
-                      }
-                    >
-                      <span className="cursor-pointer">{key}</span>
-                    </OverlayTrigger>
+                            <i className="bi bi-clipboard" /> Copy{' '}
+                            {shouldCopyParent ? 'Parent ' : ''}Object (
+                            {(shouldCopyParent
+                              ? parentKeyPath
+                              : parsedKeyPath
+                            ).join('.')}
+                            )
+                          </Button>
+                        </CopyToClipboard>
+                      </Popover.Dropdown>
+                    </Popover>
                   );
                 }}
                 valueRenderer={(raw, value, ...rawKeyPath) => {
@@ -1921,7 +2040,7 @@ function PropertySubpanel({
   );
 }
 
-function useTraceProperties({
+export function useTraceProperties({
   traceId,
   dateRange,
   initialHighlightedResult,
@@ -1982,11 +2101,13 @@ function useTraceProperties({
 
 function SidePanelHeader({
   logData,
+  generateShareUrl,
   onPropertyAddClick,
   generateSearchUrl,
   onClose,
 }: {
   logData: any;
+  generateShareUrl: () => string;
   onClose: VoidFunction;
   onPropertyAddClick?: (name: string, value: string) => void;
   generateSearchUrl: (
@@ -1997,7 +2118,7 @@ function SidePanelHeader({
 }) {
   const parsedProperties = useParsedLogProperties(logData);
 
-  const date = new Date(logData.timestamp);
+  const date = useMemo(() => new Date(logData.timestamp), [logData.timestamp]);
   const start = add(date, { minutes: -240 });
   const end = add(date, { minutes: 240 });
 
@@ -2057,7 +2178,7 @@ function SidePanelHeader({
           ) : null}
           <span className="me-2">
             <span className="text-muted">at</span>{' '}
-            {format(new Date(logData.timestamp), 'MMM d HH:mm:ss.SSS')}{' '}
+            <FormatTime value={logData.timestamp} format="withMs" />{' '}
             <span className="text-muted">
               &middot;{' '}
               {formatDistanceToNowStrictShort(new Date(logData.timestamp))} ago
@@ -2093,7 +2214,7 @@ function SidePanelHeader({
             </div>
           )}
           <CopyToClipboard
-            text={window.location.href}
+            text={generateShareUrl()}
             onCopy={() => {
               notifications.show({
                 color: 'green',
@@ -2145,53 +2266,68 @@ function SidePanelHeader({
   );
 }
 
-const ExceptionSubpanel = ({
+export type ExceptionValues = {
+  type: string;
+  value: string;
+  mechanism?: {
+    type: string;
+    handled: boolean;
+    data?: {
+      // TODO: Are these fields dynamic?
+      function?: string;
+      handler?: string;
+      target?: string;
+    };
+  };
+  stacktrace?: {
+    frames: StacktraceFrame[];
+  };
+}[];
+
+export const ExceptionSubpanel = ({
   logData,
   breadcrumbs,
   exceptionValues,
 }: {
   logData?: any;
   breadcrumbs?: StacktraceBreadcrumb[];
-  exceptionValues: {
-    type: string;
-    value: string;
-    mechanism?: {
-      type: string;
-      handled: boolean;
-      data?: {
-        // TODO: Are these fields dynamic?
-        function?: string;
-        handler?: string;
-        target?: string;
-      };
-    };
-    stacktrace?: {
-      frames: StacktraceFrame[];
-    };
-  }[];
+  exceptionValues: ExceptionValues;
 }) => {
   const firstException = exceptionValues[0];
 
-  const stacktraceFrames = useMemo(
-    () => firstException.stacktrace?.frames.reverse() ?? [],
-    [firstException.stacktrace?.frames],
-  );
+  const shouldShowSourceMapFtux = useMemo(() => {
+    return firstException?.stacktrace?.frames?.some(
+      f =>
+        f.filename.startsWith('http://') || f.filename.startsWith('https://'),
+    );
+  }, [firstException?.stacktrace?.frames]);
+
+  const stacktraceFrames = useMemo(() => {
+    if (!firstException?.stacktrace?.frames) {
+      return [];
+    }
+    return firstException?.stacktrace.frames.slice().reverse();
+  }, [firstException]);
+
+  const firstFrameIndex = useMemo(() => {
+    const firstFrame = getFirstFrame(stacktraceFrames);
+    return firstFrame ? stacktraceFrames.indexOf(firstFrame) : -1;
+  }, [stacktraceFrames]);
 
   const chronologicalBreadcrumbs = useMemo<StacktraceBreadcrumb[]>(() => {
     return [
-      {
-        category: 'exception',
-        timestamp: new Date(logData?.timestamp ?? 0).getTime() / 1000,
-        message: `${firstException.type}: ${firstException.value} `,
-      },
+      ...(firstException && breadcrumbs
+        ? [
+            {
+              category: 'exception',
+              timestamp: new Date(logData?.timestamp ?? 0).getTime() / 1000,
+              message: `${firstException.type}: ${firstException.value} `,
+            },
+          ]
+        : []),
       ...(breadcrumbs?.slice().reverse() ?? []),
     ];
-  }, [
-    breadcrumbs,
-    firstException.type,
-    firstException.value,
-    logData?.timestamp,
-  ]);
+  }, [breadcrumbs, firstException, logData?.timestamp]);
 
   const {
     handleToggleMoreRows: handleStacktraceToggleMoreRows,
@@ -2200,6 +2336,7 @@ const ExceptionSubpanel = ({
     isExpanded: stacktraceExpanded,
   } = useShowMoreRows({
     rows: stacktraceFrames,
+    maxRows: Math.max(5, firstFrameIndex + 1),
   });
 
   const {
@@ -2214,110 +2351,143 @@ const ExceptionSubpanel = ({
   // TODO: show all frames (stackable)
   return (
     <div>
-      <CollapsibleSection title="Stack Trace">
-        <SectionWrapper
-          title={
+      <SectionWrapper
+        title={
+          firstException && (
             <>
-              <div className="pb-3">
-                <div className="fw-bold fs-8">{firstException.type}</div>
-                <div className="text-muted">{firstException.value}</div>
+              <div>
+                <Text fw="bold" component="span" size="sm" c="red.6">
+                  {firstException.type}:{' '}
+                </Text>
+                <span className="text-muted">{firstException.value}</span>
               </div>
-              <div className="d-flex gap-2 flex-wrap">
-                <StacktraceValue
-                  label="mechanism"
-                  value={firstException.mechanism?.type}
-                />
-                <StacktraceValue
-                  label="handled"
-                  value={
-                    firstException.mechanism?.handled ? (
-                      <span className="text-success">true</span>
-                    ) : (
-                      <span className="text-danger">false</span>
-                    )
-                  }
-                />
-                {firstException.mechanism?.data?.function ? (
+
+              {firstException.mechanism && (
+                <div className="d-flex gap-2 flex-wrap pt-3">
                   <StacktraceValue
-                    label="function"
-                    value={firstException.mechanism.data.function}
+                    label="mechanism"
+                    value={firstException.mechanism?.type}
                   />
-                ) : null}
-                {firstException.mechanism?.data?.handler ? (
                   <StacktraceValue
-                    label="handler"
-                    value={firstException.mechanism.data.handler}
+                    label="handled"
+                    value={
+                      firstException.mechanism?.handled ? (
+                        <span className="text-success">true</span>
+                      ) : (
+                        <span className="text-danger">false</span>
+                      )
+                    }
                   />
-                ) : null}
-                {firstException.mechanism?.data?.target ? (
-                  <StacktraceValue
-                    label="target"
-                    value={firstException.mechanism.data.target}
-                  />
-                ) : null}
-              </div>
+
+                  {firstException.mechanism?.data?.function ? (
+                    <StacktraceValue
+                      label="function"
+                      value={firstException.mechanism.data.function}
+                    />
+                  ) : null}
+                  {firstException.mechanism?.data?.handler ? (
+                    <StacktraceValue
+                      label="handler"
+                      value={firstException.mechanism.data.handler}
+                    />
+                  ) : null}
+                  {firstException.mechanism?.data?.target ? (
+                    <StacktraceValue
+                      label="target"
+                      value={firstException.mechanism.data.target}
+                    />
+                  ) : null}
+                </div>
+              )}
+              {shouldShowSourceMapFtux && <SourceMapsFtux />}
             </>
-          }
+          )
+        }
+      >
+        <ErrorBoundary
+          onError={err => {
+            console.error(err);
+          }}
+          fallbackRender={() => (
+            <div className="text-danger px-2 py-1 m-2 fs-7 font-monospace bg-danger-transparent p-4">
+              An error occurred while rendering stacktrace
+            </div>
+          )}
         >
           <Table
             hideHeader
             columns={stacktraceColumns}
             data={stacktraceVisibleRows}
-            emptyMessage="No stack trace found"
+            density="zero"
+            tableMeta={{ firstFrameIndex }}
           />
+        </ErrorBoundary>
 
-          {stacktraceHiddenRowsCount ? (
-            <Button
-              variant="dark"
-              className="text-muted-hover fs-8 mx-4 mt-1 mb-3"
-              size="sm"
-              as="a"
-              onClick={handleStacktraceToggleMoreRows}
-            >
-              {stacktraceExpanded ? (
-                <>
-                  <i className="bi bi-chevron-up me-2" /> Hide stack trace
-                </>
-              ) : (
-                <>
-                  <i className="bi bi-chevron-down me-2" />
-                  Show {stacktraceHiddenRowsCount} more frames
-                </>
-              )}
-            </Button>
-          ) : null}
-        </SectionWrapper>
-      </CollapsibleSection>
+        {typeof exceptionValues[0].stacktrace === 'string' && (
+          <pre
+            className="px-4"
+            style={{
+              whiteSpace: 'pre-wrap',
+              wordWrap: 'break-word',
+            }}
+          >
+            {exceptionValues[0].stacktrace}
+          </pre>
+        )}
 
-      <CollapsibleSection title="Breadcrumbs">
-        <SectionWrapper>
-          <Table
-            columns={breadcrumbColumns}
-            data={breadcrumbVisibleRows}
-            emptyMessage="No breadcrumbs found"
-          />
-          {breadcrumbHiddenRowsCount ? (
-            <Button
-              variant="dark"
-              className="text-muted-hover fs-8 mx-4 mt-1 mb-3"
-              size="sm"
-              as="a"
-              onClick={handleBreadcrumbToggleMoreRows}
-            >
-              {breadcrumbExpanded ? (
-                <>
-                  <i className="bi bi-chevron-up me-2" /> Hide breadcrumbs
-                </>
-              ) : (
-                <>
-                  <i className="bi bi-chevron-down me-2" />
-                  Show {breadcrumbHiddenRowsCount} more breadcrumbs
-                </>
-              )}
-            </Button>
-          ) : null}
-        </SectionWrapper>
-      </CollapsibleSection>
+        {stacktraceHiddenRowsCount ? (
+          <Button
+            variant="dark"
+            className="text-muted-hover fs-8 mx-4 mt-1 mb-3"
+            size="sm"
+            as="a"
+            onClick={handleStacktraceToggleMoreRows}
+          >
+            {stacktraceExpanded ? (
+              <>
+                <i className="bi bi-chevron-up me-2" /> Hide stack trace
+              </>
+            ) : (
+              <>
+                <i className="bi bi-chevron-down me-2" />
+                Show {stacktraceHiddenRowsCount} more frames
+              </>
+            )}
+          </Button>
+        ) : null}
+      </SectionWrapper>
+
+      {breadcrumbVisibleRows.length > 0 && (
+        <CollapsibleSection title="Breadcrumbs">
+          <SectionWrapper>
+            <Table
+              columns={breadcrumbColumns}
+              data={breadcrumbVisibleRows}
+              emptyMessage="No breadcrumbs found"
+            />
+            {breadcrumbHiddenRowsCount ? (
+              <Button
+                variant="dark"
+                className="text-muted-hover fs-8 mx-4 mt-1 mb-3"
+                size="sm"
+                as="a"
+                onClick={handleBreadcrumbToggleMoreRows}
+              >
+                {breadcrumbExpanded ? (
+                  <>
+                    <i className="bi bi-chevron-up me-2" /> Hide breadcrumbs
+                  </>
+                ) : (
+                  <>
+                    <i className="bi bi-chevron-down me-2" />
+                    Show {breadcrumbHiddenRowsCount} more breadcrumbs
+                  </>
+                )}
+              </Button>
+            ) : null}
+          </SectionWrapper>
+        </CollapsibleSection>
+      )}
     </div>
   );
 };
@@ -2347,7 +2517,7 @@ const InfraSubpanelGroup = ({
     }[range];
     return [
       sub(new Date(timestamp), duration),
-      add(new Date(timestamp), duration),
+      min([add(new Date(timestamp), duration), new Date()]),
     ];
   }, [timestamp, range]);
 
@@ -2423,6 +2593,7 @@ const InfraSubpanelGroup = ({
                 ],
               }}
               logReferenceTimestamp={timestamp / 1000}
+              showDisplaySwitcher={false}
             />
           </Card.Section>
         </Card>
@@ -2449,6 +2620,7 @@ const InfraSubpanelGroup = ({
                 ],
               }}
               logReferenceTimestamp={timestamp / 1000}
+              showDisplaySwitcher={false}
             />
           </Card.Section>
         </Card>
@@ -2475,6 +2647,7 @@ const InfraSubpanelGroup = ({
                 ],
               }}
               logReferenceTimestamp={timestamp / 1000}
+              showDisplaySwitcher={false}
             />
           </Card.Section>
         </Card>
@@ -2558,12 +2731,13 @@ const InfraSubpanel = ({ logData }: { logData?: any }) => {
   );
 };
 
-const checkKeyExistsInLogData = (key: string, logData: any) => {
+export const checkKeyExistsInLogData = (key: string, logData: any) => {
   return logData?.['string.values']?.[logData?.['string.names']?.indexOf(key)];
 };
 
 export default function LogSidePanel({
   logId,
+  q,
   onClose,
   onPropertyAddClick,
   generateSearchUrl,
@@ -2572,7 +2746,9 @@ export default function LogSidePanel({
   isNestedPanel = false,
   displayedColumns,
   toggleColumn,
+  shareUrl: shareUrlProp,
 }: {
+  q?: string;
   logId: string | undefined;
   onClose: () => void;
   onPropertyAddClick?: (name: string, value: string) => void;
@@ -2590,6 +2766,7 @@ export default function LogSidePanel({
   isNestedPanel?: boolean;
   displayedColumns?: string[];
   toggleColumn?: (column: string) => void;
+  shareUrl?: string;
 }) {
   const contextZIndex = useZIndex();
 
@@ -2686,11 +2863,38 @@ export default function LogSidePanel({
     );
   }, [logData]);
 
+  const { data: meData } = api.useMe();
+
   const drawerRef = useClickOutside(() => {
     if (!subDrawerOpen) {
       _onClose();
     }
   }, ['mouseup', 'touchend']);
+
+  const generateShareUrl = useCallback(() => {
+    if (shareUrlProp) {
+      return shareUrlProp;
+    }
+    if (logData == null) {
+      return window.location.href;
+    }
+
+    // Grab ts from session replay qparam if it exists
+    const sessionReplayTs = new URLSearchParams(window.location.search).get(
+      'ts',
+    );
+
+    return `${window.location.origin}/search?${new URLSearchParams({
+      lid: logData.id,
+      sk: logData.sort_key,
+      from: start.getTime().toString(),
+      to: end.getTime().toString(),
+      ts: date.getTime().toString(),
+      q: q ?? '',
+      ...(queryTab != null ? { tb: queryTab } : {}),
+      ...(sessionReplayTs != null ? { ts: sessionReplayTs } : {}),
+    }).toString()}`;
+  }, [shareUrlProp, logData, start, end, date, q, queryTab]);
 
   return (
     <Drawer
@@ -2714,6 +2918,7 @@ export default function LogSidePanel({
             <>
               <SidePanelHeader
                 logData={logData}
+                generateShareUrl={generateShareUrl}
                 onPropertyAddClick={onPropertyAddClick}
                 generateSearchUrl={generateSearchUrl}
                 onClose={_onClose}
@@ -2836,7 +3041,7 @@ export default function LogSidePanel({
 
                 {/* Session Replay */}
                 {displayedTab === 'replay' ? (
-                  <div className="px-4 overflow-hidden flex-grow-1">
+                  <div className="overflow-hidden flex-grow-1">
                     {rumSessionId != null ? (
                       <SessionSubpanel
                         start={start}
