@@ -15,12 +15,6 @@ sed -i "s|HYPERDX_APP_URL=.*|HYPERDX_APP_URL=$new_url|g" .env
 
 echo "API and APP URL set to: $new_url"
 
-make build-local || exit 1
+make build-app || exit 1
 
-echo "Build successful"
-
-docker compose up -d || exit 1
-
-docker builder prune -a
-
-echo "HyperDX is running at $new_url:8080"
+echo "Build app successful"

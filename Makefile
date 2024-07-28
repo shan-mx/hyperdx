@@ -85,6 +85,16 @@ build-local:
 		--build-arg SERVER_URL=${HYPERDX_API_URL}:${HYPERDX_API_PORT} \
 		. -f ./packages/app/Dockerfile -t ${IMAGE_NAME}:${LATEST_VERSION}-app --target prod
 
+.PHONY: build-app
+build-app:
+	docker build \
+		--build-arg CODE_VERSION=${LATEST_VERSION} \
+		--build-arg OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT} \
+		--build-arg OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME} \
+		--build-arg PORT=${HYPERDX_APP_PORT} \
+		--build-arg SERVER_URL=${HYPERDX_API_URL}:${HYPERDX_API_PORT} \
+		. -f ./packages/app/Dockerfile -t ${IMAGE_NAME}:${LATEST_VERSION}-app --target prod
+
 .PHONY: version
 version:
 	sh ./version.sh
