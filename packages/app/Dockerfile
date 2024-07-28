@@ -7,7 +7,7 @@ WORKDIR /app
 
 COPY .yarn ./.yarn
 COPY .yarnrc yarn.lock ./packages/app/package.json ./packages/app/tsconfig.json ./packages/app/next.config.js ./packages/app/mdx.d.ts ./packages/app/.eslintrc.js ./
-RUN yarn install --frozen-lockfile && yarn cache clean
+RUN yarn cache clean && yarn install --registry https://registry.npmmirror.com --frozen-lockfile && yarn cache clean
 
 
 ## dev #############################################################################################
@@ -37,7 +37,7 @@ COPY ./packages/app/pages ./pages
 COPY ./packages/app/public ./public 
 COPY ./packages/app/styles ./styles
 COPY --from=base /app/node_modules ./node_modules
-RUN yarn build && yarn install --production --ignore-scripts --prefer-offline
+RUN yarn build && yarn install --production --ignore-scripts --prefer-offline --registry https://registry.npmmirror.com/
 
 
 ## prod ############################################################################################
